@@ -273,6 +273,8 @@ class PETRHead(AnchorFreeHead):
         """Initialize weights of the transformer head."""
         # The initialization for transformer is important
         self.transformer.init_weights()
+        # NOTE
+        # learnable anchor points in 3D world space with uniform distribution from 0 to 1
         nn.init.uniform_(self.reference_points.weight.data, 0, 1)
         if self.loss_cls.use_sigmoid:
             bias_init = bias_init_with_prob(0.01)
@@ -296,11 +298,16 @@ class PETRHead(AnchorFreeHead):
             bin_size = (self.position_range[3] - self.depth_start) / self.depth_num
             coords_d = self.depth_start + bin_size * index
 
+        # NOTE
+        # generate P^{2d}
+        # discretize the camera frustum space to generate a meshgrid of size (W_F, H_F, D)
         D = coords_d.shape[0]
         coords = torch.stack(torch.meshgrid([coords_w, coords_h, coords_d])).permute(1, 2, 3, 0) # W, H, D, 3
         coords = torch.cat((coords, torch.ones_like(coords[..., :1])), -1)
         coords[..., :2] = coords[..., :2] * torch.maximum(coords[..., 2:3], torch.ones_like(coords[..., 2:3])*eps)
 
+        # NOTE
+        # transform P^{2d} to P^{3d}
         img2lidars = []
         for img_meta in img_metas:
             img2lidar = []
@@ -313,6 +320,8 @@ class PETRHead(AnchorFreeHead):
         coords = coords.view(1, 1, W, H, D, 4, 1).repeat(B, N, 1, 1, 1, 1, 1)
         img2lidars = img2lidars.view(B, N, 1, 1, 1, 4, 4).repeat(1, 1, W, H, D, 1, 1)
         coords3d = torch.matmul(img2lidars, coords).squeeze(-1)[..., :3]
+        # NOTE
+        # normalize 3D coordinates
         coords3d[..., 0:1] = (coords3d[..., 0:1] - self.position_range[0]) / (self.position_range[3] - self.position_range[0])
         coords3d[..., 1:2] = (coords3d[..., 1:2] - self.position_range[1]) / (self.position_range[4] - self.position_range[1])
         coords3d[..., 2:3] = (coords3d[..., 2:3] - self.position_range[2]) / (self.position_range[5] - self.position_range[2])
@@ -322,6 +331,9 @@ class PETRHead(AnchorFreeHead):
         coords_mask = masks | coords_mask.permute(0, 1, 3, 2)
         coords3d = coords3d.permute(0, 1, 4, 5, 3, 2).contiguous().view(B*N, -1, H, W)
         coords3d = inverse_sigmoid(coords3d)
+        
+        # NOTE
+        # P^{3d} is feed into a MLP(conv instead) and transformed to the 3D position embedding
         coords_position_embeding = self.position_encoder(coords3d)
         
         return coords_position_embeding.view(B, N, self.embed_dims, H, W), coords_mask
@@ -412,6 +424,10 @@ class PETRHead(AnchorFreeHead):
                     pos_embeds.append(pos_embed.unsqueeze(1))
                 pos_embed = torch.cat(pos_embeds, 1)
 
+        # NOTE
+        # reference_points are uniform sampled 3d meshgrid
+        #  put coordinates of 3D anchor points input a small MLP network with two 
+        # linear layers and generate the initial object queries Q_0
         reference_points = self.reference_points.weight
         query_embeds = self.query_embedding(pos2posemb3d(reference_points))
         reference_points = reference_points.unsqueeze(0).repeat(batch_size, 1, 1) #.sigmoid()
